@@ -90,4 +90,4 @@ GitHub Actions는 자동 활성화되어 있지 않습니다. [CI 예제](docs/c
 | server.py / web | 결과 화면·샘플·기록 재생 |
 | WORKFLOW.md | Codex가 수행할 초보자 설치 절차 |
 
-[출처·라이선스](NOTICE.md) · [촬영 순서](docs/FILMING.md)
+[출처·라이선스](NOTICE.md) · [촬영 순서](docs/FILMING.md) · [실제 검증 범위](docs/VERIFICATION.md)
