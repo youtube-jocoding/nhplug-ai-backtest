@@ -1,0 +1,1 @@
+# Core demo uses Python standard library only. Python 3.10+ and curl required.

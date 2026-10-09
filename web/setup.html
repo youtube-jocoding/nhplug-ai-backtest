@@ -1,0 +1,13 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AI 백테스트 시작하기</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/setup.css"><script src="/setup.js" defer></script></head>
+<body><main class="onboard">
+<header><h1>내 전략, 과거에는 어땠을까요?</h1><p>NH 과거 주가와 AI로 시험해 봅니다. 실제 주문은 없습니다.</p></header>
+<section><h2>1. NH 키 연결</h2><p><a href="https://www.nhplug.com/intro" target="_blank" rel="noreferrer">Namuh PLUG 공식 사이트</a>에서 OpenAPI 이용 신청과 앱키·앱시크릿 발급을 먼저 완료하세요. 키는 아래 화면에만 입력하고 채팅에는 붙이지 마세요.</p>
+<form id="keys"><label>앱키<input id="key" type="password" autocomplete="off" required></label><label>앱시크릿<input id="secret" type="password" autocomplete="off" required></label><button id="save">저장하고 연결 확인</button></form>
+<p class="muted">키·토큰은 이 컴퓨터의 private 폴더에 소유자 전용 파일로 저장됩니다. 암호화 저장소가 아니므로 공유 PC에서는 사용하지 마세요. GitHub에는 올라가지 않습니다.</p><p id="connection" role="status"></p></section>
+<section><h2>2. 예제 실행</h2><p>삼성전자 · 2026.09.14~09.23 · 가상 투자금 100만원 · 매수 예산 30만원 · 편도 비용 0.1% 가정</p><p>이전 자동매매 코드의 판단 규칙을 하루 한 번 판단으로 단순화했습니다. 종목은 기능 시연용이며 추천이 아닙니다.</p>
+<label class="consent"><input id="consent" type="checkbox"> NH 시세 조회와 Codex AI 판단 실행에 동의합니다. Codex 이용량이 사용될 수 있습니다.</label>
+<button id="start" disabled>AI 백테스트 시작</button><p id="progress" role="status">키를 연결한 뒤 시작하세요.</p>
+<a id="result" class="result" href="/?preset=filming" hidden>3. 결과 화면 열기 →</a></section>
+<section class="notes"><p>현재 AI로 과거를 재분석하는 교육용 예제입니다. 당시 실제 투자 결과나 미래 수익을 보장하지 않습니다. 모델·시점에 따라 판단과 결과가 달라질 수 있습니다.</p><a href="/">가상 데이터로 화면만 먼저 보기</a></section>
+</main></body></html>

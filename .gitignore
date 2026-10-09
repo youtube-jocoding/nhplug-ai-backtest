@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+private/
+datasets/
+cache/
+runs/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+.venv/
