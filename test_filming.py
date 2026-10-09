@@ -39,7 +39,7 @@ class FilmingTests(unittest.TestCase):
     def test_page_and_filming_preset_assets(self):
         status, body = self.request('/?preset=filming')
         self.assertEqual(status, 200)
-        self.assertIn('백테스트 실행', body)
+        self.assertIn('AI 판단으로 백테스트', body)
         self.assertIn("get('preset')==='filming'", self.request('/app.js')[1])
 
     def test_sample_explicitly_not_ai(self):

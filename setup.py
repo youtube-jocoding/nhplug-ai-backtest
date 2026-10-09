@@ -29,7 +29,7 @@ def private_write(path, value):
     tmp = path.with_name(path.name + '.tmp')
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.chmod(tmp, 0o600)
-    with os.fdopen(fd, 'w') as f:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         json.dump(value, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
@@ -61,24 +61,53 @@ class State:
         self.token = secrets.token_urlsafe(32)
         self.expires = time.monotonic() + 600
         self.cookie = secrets.token_urlsafe(32)
+        self.scenario_token = secrets.token_urlsafe(32)
+        self.scenario_result = None
+
+    def scenario_job(self, config):
+        try:
+            self.stage, self.message = 'ai', '선택한 설정으로 Codex가 날짜별로 판단하고 있습니다.'
+            data = json.loads((ROOT / 'datasets/nh-005930.json').read_text(encoding='utf-8'))
+            if data.get('source') != 'nh_period':
+                raise ValueError('실제 가격 필요')
+            experiment_id = secrets.token_hex(16)
+            provider = CodexProvider(ROOT / 'cache/experiments' / experiment_id)
+            total = sum(config['start'] <= b['date'] <= config['end'] for b in data['bars'])
+            completed = 0
+            def judge(snap):
+                nonlocal completed
+                self.message = f"{completed + 1}/{total}거래일 · {snap['date']}의 AI 판단을 기다리고 있습니다."
+                answer = provider(snap)
+                completed += 1
+                return answer
+            result = run(data, config['start'], config['end'], config['initial'], '.0001',
+                         judge, official_costs=True, strategy_config=config)
+            result['experiment_id'] = experiment_id
+            result['ai_calls'] = provider.calls
+            result['generated_at'] = datetime.now(timezone.utc).isoformat()
+            private_write(ROOT / 'runs/scenario-latest.json', result)
+            private_write(ROOT / 'runs/experiments' / (experiment_id + '.json'), result)
+            self.scenario_result = dict(result=result)
+            self.stage, self.message = 'done', '선택한 조건의 AI 백테스트를 완료했습니다.'
+        except Exception as error:
+            self.stage = 'error'
+            self.message = ('선택한 설정으로 AI 실행을 완료하지 못했습니다. ' +
+                            ('Codex 실행 실패 또는 시간 초과입니다. 로그인·이용량 상태를 확인해야 합니다.' if isinstance(error, (RuntimeError, subprocess.TimeoutExpired))
+                             else '가격 범위·지표 자료 또는 실행 환경을 확인해야 합니다.') +
+                            ' 이전 결과나 샘플로 대체하지 않았습니다.')
+        finally:
+            with self.lock:
+                self.busy = False
 
     def job(self):
         try:
             self.stage, self.message = 'prices', 'NH 과거 시세를 읽고 있습니다. 실제 주문은 하지 않습니다.'
             raw = nh_client.fetch('005930', '2026-09-23', 400)
             data = normalize(raw, '005930', datetime.now(timezone.utc).isoformat(), '2026-09-23', reviewed=True)
-            self.stage, self.message = 'ai', '8거래일의 AI 판단을 생성합니다. 수 분 걸릴 수 있습니다.'
-            provider = CodexProvider(ROOT / 'cache')
-            result = run(data, '2026-09-14', '2026-09-23', '1000000', '0.001', provider)
-            result['ai_mode'] = 'codex-cli'
-            result['generated_at'] = datetime.now(timezone.utc).isoformat()
-            # Publish inputs/result only after the whole run succeeds.
             private_write(ROOT / 'datasets/nh-005930.json', data)
-            private_write(ROOT / 'runs/nh-codex.json', result)
-            self.stage, self.message = 'done', '완료! 결과 화면에서 판단 이유와 가상 거래를 확인하세요.'
+            self.stage, self.message = 'done', '실제 주가 준비 완료. 이제 조건과 프롬프트를 정하고 AI 판단을 실행하세요.'
         except Exception:
-            # Do not return raw vendor errors, credential-bearing URLs or traces.
-            self.stage, self.message = 'error', '실행을 완료하지 못했습니다. NH 이용 권한·네트워크·Codex 로그인/이용량을 확인한 뒤 다시 시도하세요. 가짜 결과로 대체하지 않았습니다.'
+            self.stage, self.message = 'error', 'NH 과거 주가를 준비하지 못했습니다. 키의 이용 권한과 NH 연결 상태를 확인해야 합니다. 샘플로 대체하지 않았습니다.'
         finally:
             with self.lock:
                 self.busy = False
@@ -101,6 +130,45 @@ class Handler(DashboardHandler):
             return self.reply(403, {'error': '로컬 접속만 허용합니다.'})
         parsed = urlsplit(self.path)
         state = self.server.state
+        if parsed.path == '/' and not (ROOT / 'datasets/nh-005930.json').exists():
+            self.send_response(303)
+            self.send_header('Location', '/setup')
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+        if parsed.path == '/setup':
+            # Loopback + Host validation; writes additionally require same Origin
+            # and a Strict cookie. No manual browser login or expiring URL needed.
+            body = (Path(__file__).resolve().parent / 'web/setup.html').read_bytes()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/html; charset=utf-8')
+            self.send_header('Set-Cookie', 'nh_backtest=' + state.cookie + '; HttpOnly; SameSite=Strict; Path=/')
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('Referrer-Policy', 'no-referrer')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if parsed.path == '/api/scenario-options':
+            from scenarios import DEFAULTS
+            from datetime import date, timedelta
+            try:
+                data = json.loads((ROOT / 'datasets/nh-005930.json').read_text(encoding='utf-8'))
+                earliest = max('2026-01-01', (date.fromisoformat(data['bars'][0]['date']) + timedelta(days=364)).isoformat())
+                latest = min('2026-12-31', data['bars'][-1]['date'])
+            except (OSError, ValueError, KeyError, IndexError):
+                earliest = latest = None
+            return self.reply(200, dict(defaults=DEFAULTS, first=earliest, last=latest, csrf=state.scenario_token,
+                                        dates=[b['date'] for b in data['bars'] if earliest <= b['date'] <= latest] if earliest else []))
+        if parsed.path == '/api/scenario-status':
+            if not secrets.compare_digest(self.headers.get('X-Backtest-CSRF', ''), state.scenario_token):
+                return self.reply(403, {'error': '화면을 새로 열어 주세요.'})
+            return self.reply(200, dict(stage=state.stage, message=state.message, busy=state.busy,
+                                        payload=state.scenario_result))
+        # Read-only local results need no onboarding cookie. Credential changes
+        # use same-origin write protection; key changes require the setup cookie.
+        if parsed.path in ('/', '/app.js', '/scenario.js', '/style.css', '/api/official-result', '/api/experiments'):
+            return super().do_GET()
         if parsed.path == '/start':
             token = parse_qs(parsed.query).get('token', [''])[0]
             with state.lock:
@@ -134,6 +202,32 @@ class Handler(DashboardHandler):
 
     def do_POST(self):
         origins = {f'http://127.0.0.1:{self.server.server_port}', f'http://localhost:{self.server.server_port}'}
+        if self.path == '/api/scenario-ai':
+            state = self.server.state
+            if not self.valid_host() or self.headers.get('Origin') not in origins or not secrets.compare_digest(self.headers.get('X-Backtest-CSRF', ''), state.scenario_token):
+                return self.reply(403, {'error': '이 컴퓨터에서 연 백테스트 화면에서만 실행할 수 있습니다. 화면을 새로 열어 주세요.'})
+            try:
+                from scenarios import parse
+                size = int(self.headers.get('Content-Length', '0'))
+                if not 0 < size < 20000:
+                    raise ValueError('설정 크기 오류')
+                payload = json.loads(self.rfile.read(size))
+                if payload.get('consent') is not True:
+                    raise ValueError('새 AI 실행의 이용량 사용 안내에 동의해 주세요.')
+                config = parse(payload['config'])
+                # Validate real prices and date coverage before spending AI usage.
+                from scenarios import validate_experiment
+                data = json.loads((ROOT / 'datasets/nh-005930.json').read_text(encoding='utf-8'))
+                validate_experiment(data, config)
+                with state.lock:
+                    if state.busy:
+                        return self.reply(409, {'error': 'AI 실행 중입니다. 완료 후 다시 실행하세요.'})
+                    state.busy, state.scenario_result = True, None
+                    state.stage, state.message = 'starting', '선택한 설정으로 AI 실행 준비 중…'
+                    threading.Thread(target=state.scenario_job, args=(config,), daemon=True).start()
+                return self.reply(202, {'message': 'AI 실행을 시작했습니다.'})
+            except (ValueError, KeyError, TypeError, OSError) as error:
+                return self.reply(400, {'error': str(error) if isinstance(error, ValueError) else '저장된 실제 가격이나 설정을 확인하세요.'})
         if not self.valid_host() or not self.authenticated() or self.headers.get('Origin') not in origins:
             return self.reply(403, {'error': '인증된 로컬 화면에서만 가능합니다.'})
         if self.path not in ('/api/keys', '/api/start'):
@@ -151,11 +245,10 @@ class Handler(DashboardHandler):
                     save_keys(data)
                     return self.reply(200, {'message': 'NH 연결 완료. 이제 백테스트를 시작하세요.'})
                 if data != {'consent': True}:
-                    raise ValueError('시세 조회와 AI 사용량 발생에 동의해 주세요.')
+                    raise ValueError('NH 과거 시세 조회에 동의해 주세요.')
                 nh_client.credentials()
-                provider = CodexProvider(ROOT / 'cache')
-                if not provider.binary or not shutil.which('curl'):
-                    raise ValueError('Codex CLI 또는 curl이 없습니다. Codex에 설치를 요청하세요.')
+                if not shutil.which('curl'):
+                    raise ValueError('curl이 없습니다. Codex에 설치를 요청하세요.')
                 state.busy = True
                 state.stage, state.message = 'starting', '시작 준비 중…'
                 threading.Thread(target=state.job, daemon=True).start()
@@ -164,11 +257,16 @@ class Handler(DashboardHandler):
             return self.reply(400, {'error': '연결 또는 입력 확인이 필요합니다. 키 발급·NH 권한·Codex 설치를 확인하세요. 키나 오류 원문은 표시하지 않습니다.'})
 
 
+class LocalHTTPServer(ThreadingHTTPServer):
+    # Windows SO_REUSEADDR can bind to another running listener's port.
+    allow_reuse_address = os.name != 'nt'
+
+
 def make_server(port=8771):
     try:
-        server = ThreadingHTTPServer(('127.0.0.1', port), Handler)
+        server = LocalHTTPServer(('127.0.0.1', port), Handler)
     except OSError:
-        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        server = LocalHTTPServer(('127.0.0.1', 0), Handler)
     server.state = State()
     return server
 
@@ -179,8 +277,9 @@ if __name__ == '__main__':
     p.add_argument('--port', type=int, default=8771)
     a = p.parse_args()
     server = make_server(a.port)
-    url = f'http://127.0.0.1:{server.server_port}/start?token={server.state.token}'
-    print('설정 화면 (10분 동안 한 번 사용 가능): ' + url, flush=True)
+    url = f'http://127.0.0.1:{server.server_port}/setup'
+    print('FORWARD_PORT=' + str(server.server_port), flush=True)
+    print('설정 화면: ' + url, flush=True)
     if a.open:
         webbrowser.open(url)
     server.serve_forever()

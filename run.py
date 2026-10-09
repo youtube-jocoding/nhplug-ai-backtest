@@ -36,7 +36,7 @@ def main():
     p.add_argument('--fee', default='0.001')
     p.add_argument('--out', type=Path, default=HERE / 'runs' / 'sample.json')
     args = p.parse_args()
-    data = json.loads(args.dataset.read_text()) if args.dataset else synthetic()
+    data = json.loads(args.dataset.read_text(encoding='utf-8')) if args.dataset else synthetic()
     if data['source'] != 'synthetic' and args.provider == 'fixture':
         p.error('NH 실제 가격에는 fixture 판단을 사용하지 않습니다. codex 또는 replay를 선택하세요')
     provider = fixture_provider if args.provider == 'fixture' else CodexProvider(args.cache, args.provider == 'replay')
@@ -44,7 +44,7 @@ def main():
     result['generated_at'] = datetime.now(timezone.utc).isoformat()
     result['ai_mode'] = 'fixture-not-ai' if args.provider == 'fixture' else 'codex-cli'
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+    args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps({k: result[k] for k in ['source', 'ai_mode', 'initial', 'final', 'profit', 'run_hash']}, ensure_ascii=False))
     print('signals', len(result['signals']), 'fills', len(result['trades']), 'saved', args.out)
 

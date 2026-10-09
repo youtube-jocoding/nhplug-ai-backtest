@@ -1,62 +1,40 @@
 'use strict';
 const $=id=>document.getElementById(id),fmt=n=>new Intl.NumberFormat('ko-KR',{maximumFractionDigits:2}).format(n);
-const word={BUY:'매수',SELL:'매도',HOLD:'보유 / 대기'};
-let result=null,revision=0;
+const word={BUY:'사기',SELL:'팔기',HOLD:'기다리기 / 보유'};
+let result=null,selected=null,comparisonResult=null;
 function list(el,items){el.replaceChildren(...items.map(x=>{const li=document.createElement('li');li.textContent=x;return li;}));}
-function selectDay(day){
- if(!result)return;
- const s=result.signals.find(s=>s.date===day);if(!s)return;
- $('day').value=day;$('decision').textContent=word[s.action];$('reason').textContent=s.reason;
- $('aiReason').textContent=(s.provider==='codex-cli'?'실제 Codex 응답: ':'가상 테스트 응답: ')+s.ai_reason;
- list($('facts'),s.indicators);
- const t=result.trades.find(t=>t.signal_date===day);
- $('fill').textContent=t?`${t.date} ${word[t.side]} ${fmt(t.quantity)}주 × ${fmt(t.price)}원 · 비용 ${fmt(t.cost)}원`:s.executable_next_day?'체결 없음 (대기·보유 상태·예산 조건)':'마지막 날 판단 — 기간 내 다음 거래일이 없어 체결하지 않음';
- $('audit').textContent=JSON.stringify({information_through:s.input.information_through,price:s.input.market.price,high_52w:s.input.market.high_52w,turnover:s.input.market.turnover,input_hash:s.input_hash},null,2);
-}
 function svgEl(tag,attrs,text){const e=document.createElementNS('http://www.w3.org/2000/svg',tag);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e;}
-function chart(){
- const svg=$('chart');svg.replaceChildren();const bars=result.bars;
- const lo=Math.min(...bars.map(b=>b.low))*.99,hi=Math.max(...bars.map(b=>b.high))*1.01;
- const x=i=>72+i/(bars.length-1)*885,y=p=>320-(p-lo)/(hi-lo)*280;
- for(let i=0;i<=4;i++){const p=lo+(hi-lo)*i/4;svg.append(svgEl('line',{x1:72,x2:957,y1:y(p),y2:y(p),stroke:'#e9eff4'}),svgEl('text',{x:63,y:y(p)+4,'text-anchor':'end'},fmt(Math.round(p))));}
- const ticks=[...new Set([0,Math.floor((bars.length-1)/3),Math.floor((bars.length-1)*2/3),bars.length-1])];
- for(const i of ticks)svg.append(svgEl('text',{x:x(i),y:350,'text-anchor':'middle'},bars[i].date.slice(5)));
- svg.append(svgEl('polyline',{points:bars.map((b,i)=>`${x(i)},${y(b.close)}`).join(' '),fill:'none',stroke:'#008b8d','stroke-width':2.5}));
- bars.forEach((b,i)=>{const c=svgEl('circle',{cx:x(i),cy:y(b.close),r:4,fill:'#008b8d',tabindex:0,role:'button','aria-label':`${b.date} 판단 확인`});c.append(svgEl('title',{},`${b.date} 종가 ${fmt(b.close)}`));c.addEventListener('click',()=>selectDay(b.date));c.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')selectDay(b.date);});svg.append(c);});
- for(const t of result.trades){const i=bars.findIndex(b=>b.date===t.date),px=x(i),py=y(t.price),up=t.side==='BUY';const m=svgEl('polygon',{points:up?`${px},${py-10} ${px-8},${py+6} ${px+8},${py+6}`:`${px},${py+10} ${px-8},${py-6} ${px+8},${py-6}`,fill:up?'#008b8d':'#d74251',class:'marker',tabindex:0,role:'button','aria-label':`${t.date} ${word[t.side]} 체결`});m.append(svgEl('title',{},`${t.date} ${word[t.side]} ${fmt(t.price)}원`));m.addEventListener('click',()=>selectDay(t.signal_date));m.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' ')selectDay(t.signal_date);});svg.append(m);}
-}
-function render(){
- $('mInitial').textContent=fmt(result.initial);$('mFinal').textContent=fmt(result.final);$('mProfit').textContent=(result.profit>0?'+':'')+fmt(result.profit);$('mProfit').classList.toggle('loss',result.profit<0);$('mTrades').textContent=result.trades.length;
- $('warning').textContent=(result.source==='synthetic'?'샘플 가격 데이터':'NH 과거 시세')+' · '+(result.ai_mode==='codex-cli'?'실제 Codex 판단 기록 재생':'가상 테스트 판단 (AI 출력 아님)')+' · 실제 투자 성과 아님';
- $('source').textContent=`${result.name} · ${result.actual_start} ~ ${result.actual_end} · 조회: ${result.retrieved_at} · 매수 예산 ${fmt(result.buy_amount)}원 · 편도 비용 ${fmt(result.cost_rate_per_side*100)}% 가정`;
+function averages(s,n){const c=s.input.market.closes;if(c.length<n)return null;return c.slice(-n).reduce((a,b)=>a+b,0)/n;}
+function rsi(c){if(c.length<15)return null;let up=0,down=0;for(let i=c.length-14;i<c.length;i++){const d=c[i]-c[i-1];up+=Math.max(d,0);down+=Math.max(-d,0);}return down===0?(up?100:50):Math.round((100-100/(1+up/down))*10)/10;}
+function ema(c,n){if(c.length<n)return [];const out=[c.slice(0,n).reduce((a,b)=>a+b,0)/n];for(const v of c.slice(n))out.push(v*2/(n+1)+out.at(-1)*(1-2/(n+1)));return out;}
+function macd(c){const a=ema(c,12),b=ema(c,26),n=Math.min(a.length,b.length);if(!n)return null;const line=a.slice(-n).map((v,i)=>v-b[b.length-n+i]),sig=ema(line,9);return sig.length?Math.round(line.at(-1)*100)/100-Math.round(sig.at(-1)*100)/100:null;}
+function checkRows(s){if(s.input.condition_checks){$('checks').replaceChildren(...s.input.condition_checks.map(row=>{const el=document.createElement('div');el.className='check'+(row.passed?'':' no');const title=document.createElement('span'),state=document.createElement('b'),detail=document.createElement('small');title.textContent=row.label;state.textContent=!row.enabled?'사용 안 함':row.passed?'충족':'미충족';detail.textContent=row.detail;el.append(title,state,detail);return el;}));return;}const m=s.input.market,ma5=averages(s,5),ma20=averages(s,20),strength=rsi(m.closes),diff=macd(m.closes);const checks=[['최근 평균보다 높은가?',ma5!==null&&ma20!==null&&m.price>ma5&&m.price>ma20,`가격 ${fmt(m.price)}원 / 5일 ${fmt(ma5)}원 / 20일 ${fmt(ma20)}원`],['상승 흐름인가? (MACD)',diff!==null&&diff>0,`MACD 차이 ${diff===null?'자료 없음':fmt(diff)} · 0보다 커야 함`],['과열 점수가 높지 않은가? (RSI)',strength!==null&&strength<=70,`RSI ${strength===null?'자료 없음':fmt(strength)} · 70 이하`],['1년 최고가에 너무 가깝지 않은가?',m.high_52w>0&&m.price<m.high_52w*.95,`가격 ${fmt(m.price)}원 < 기준 ${fmt(m.high_52w*.95)}원`],['충분히 많이 거래됐는가?',m.turnover>=10000000000,`하루 거래대금 ${fmt(m.turnover/100000000)}억 원 · 100억 이상`]];
+ $('checks').replaceChildren(...checks.map(([label,ok,detail])=>{const row=document.createElement('div');row.className='check'+(ok?'':' no');const l=document.createElement('span'),b=document.createElement('b'),d=document.createElement('small');l.textContent=label;b.textContent=ok?'충족':'미충족';d.textContent=detail;row.append(l,b,d);return row;}));}
+function selectDay(day){if(!result)return;const s=result.signals.find(s=>s.date===day);if(!s)return;selected=day;$('day').value=day;const held=s.input.market.held;
+ $('decision').textContent=s.action==='HOLD'?(held?'이미 산 주식을 보유해요':'오늘은 사지 않고 기다려요'):s.action==='BUY'?'다음 거래일에 사기로 했어요':'다음 거래일에 팔기로 했어요';$('reason').textContent=s.reason;$('aiReason').textContent=s.ai_reason;list($('facts'),s.indicators);checkRows(s);
+ let position=$('positionRule');if(!position){position=document.createElement('p');position.id='positionRule';position.className='position-rule';$('reason').after(position);}position.textContent=held?`이날 ${s.input.market.qty}주 보유 · 산 가격 ${fmt(s.input.market.avg)}원 → 종가 ${fmt(s.input.market.price)}원 (${fmt(s.input.market.pnl_pct)}%). −${result.strategy_config?.stop_loss??5}% 이하 또는 +${result.strategy_config?.take_profit??10}% 이상이면 AI 의견보다 매도 규칙이 우선합니다. 이 변화율은 비용 차감 전 주가 기준입니다.`:'이날 보유 주식 0주 · 팔 주식이 없으므로 매도·손절 규칙은 적용하지 않습니다.';
+ const t=result.trades.find(t=>t.signal_date===day);$('fill').textContent=t?`${t.date}에 ${fmt(t.quantity)}주를 1주당 ${fmt(t.price)}원에 ${t.side==='BUY'?'샀습니다':'팔았습니다'}. 수수료 ${fmt(t.commission)}원 + 세금 ${fmt(t.transaction_tax+t.rural_tax)}원.`:!s.executable_next_day?'마지막 판단입니다. 선택 기간에 다음 거래일이 없어서 실행하지 않았습니다.':s.action==='BUY'?'매수 판단은 있었지만 살 수 있는 수량이 없어 매매하지 않았습니다.':'이 판단으로 발생한 매매는 없습니다.';
+ const eq=result.equity.find(e=>e.date===day),bar=result.bars.find(b=>b.date===day);$('balance').textContent=`${day} · 현금 ${fmt(eq.cash)}원 + ${eq.shares}주 × ${fmt(bar.close)}원 = ${fmt(eq.value)}원`;
+ $('audit').textContent=JSON.stringify({information_through:s.input.information_through,original_ai_cash:s.input.market.cash,input_hash:s.input_hash,calculation_mode:result.calculation_mode},null,2);
+ const i=result.signals.indexOf(s);$('prevDay').disabled=i===0;$('nextDay').disabled=i===result.signals.length-1;if(typeof updateDayCompare==='function')updateDayCompare(day);chart();equityChart();}
+function plot(svg,series,minY,maxY,height){svg.replaceChildren();const width=1000,left=95,right=970,top=25,bottom=height-45;const range=maxY-minY||Math.max(Math.abs(maxY)*.01,1),lo=minY-range*.12,hi=maxY+range*.12;const x=i=>left+i/(result.bars.length-1)*(right-left),y=v=>bottom-(v-lo)/(hi-lo)*(bottom-top);
+ for(let i=0;i<=4;i++){const p=lo+(hi-lo)*i/4;svg.append(svgEl('line',{x1:left,x2:right,y1:y(p),y2:y(p),stroke:'#e5edf2'}),svgEl('text',{x:left-10,y:y(p)+5,'text-anchor':'end'},fmt(Math.round(p))));}
+ result.bars.forEach((b,i)=>{if(result.bars.length<=10||i===0||i===result.bars.length-1)svg.append(svgEl('text',{x:x(i),y:height-14,'text-anchor':'middle'},b.date.slice(5)));});
+ for(const item of series){let points=[];const flush=()=>{if(points.length)svg.append(svgEl('polyline',{points:points.join(' '),fill:'none',stroke:item.color,'stroke-width':2.5,'stroke-dasharray':item.dash||'none'}));points=[];};item.values.forEach((v,i)=>{if(v===null||!Number.isFinite(v))flush();else points.push(`${x(i)},${y(v)}`);});flush();}
+ if(selected){const i=result.bars.findIndex(b=>b.date===selected);svg.append(svgEl('line',{x1:x(i),x2:x(i),y1:top,y2:bottom,stroke:'#7c8fa3','stroke-dasharray':'4 4'}));}return {x,y};}
+function chart(){const bars=result.bars,ma5=result.signals.map(s=>averages(s,result.strategy_config?.short_days??5)),ma20=result.signals.map(s=>averages(s,result.strategy_config?.long_days??20));const values=[...bars.map(b=>b.low),...bars.map(b=>b.high),...ma5,...ma20].filter(v=>v!==null&&Number.isFinite(v));const svg=$('chart'),{x,y}=plot(svg,[{values:bars.map(b=>b.close),color:'#142d4d'},{values:ma5,color:'#087e83'},{values:ma20,color:'#a66514',dash:'6 5'}],Math.min(...values),Math.max(...values),370);
+ bars.forEach((b,i)=>{const c=svgEl('circle',{cx:x(i),cy:y(b.close),r:dayRadius(b.date),fill:'#142d4d',tabindex:0,role:'button','aria-label':`${b.date} 판단 확인`});c.append(svgEl('title',{},`${b.date} 종가 ${fmt(b.close)}원`));activate(c,()=>selectDay(b.date));svg.append(c);});
+ for(const t of result.trades){const i=bars.findIndex(b=>b.date===t.date),px=x(i),py=y(t.price),up=t.side==='BUY';const m=svgEl('polygon',{points:up?`${px},${py-12} ${px-9},${py+7} ${px+9},${py+7}`:`${px},${py+12} ${px-9},${py-7} ${px+9},${py-7}`,fill:up?'#087e83':'#b34049',stroke:'#fff','stroke-width':2,tabindex:0,role:'button','aria-label':`${t.date} ${word[t.side]} 이유`});m.append(svgEl('title',{},`${t.date} ${word[t.side]} · ${t.signal_date} 판단`));activate(m,()=>selectDay(t.signal_date));svg.append(m);}}
+function dayRadius(day){return day===selected?7:5;}function activate(el,fn){el.addEventListener('click',fn);el.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();fn();}});}
+function equityChart(){const values=result.equity.map(e=>e.value),other=comparisonResult?.equity.map(e=>e.value)||[],series=[{values,color:'#087e83'}];if(other.length===values.length)series.push({values:other,color:'#8565b5',dash:'6 5'});const {x,y}=plot($('equityChart'),series,Math.min(result.initial,...values,...other),Math.max(result.initial,...values,...other),250);$('equityChart').append(svgEl('line',{x1:95,x2:970,y1:y(result.initial),y2:y(result.initial),stroke:'#b18c59','stroke-dasharray':'5 4'}));result.equity.forEach((e,i)=>{$('equityChart').append(svgEl('circle',{cx:x(i),cy:y(e.value),r:dayRadius(e.date),fill:'#087e83'}));});}
+function render(){$('resultPanels').hidden=false;if($('shortLegend'))$('shortLegend').textContent=`━ ${result.strategy_config?.short_days??5}일 평균`;if($('longLegend'))$('longLegend').textContent=`┄ ${result.strategy_config?.long_days??20}일 평균`;const sum=k=>result.trades.reduce((a,t)=>a+(t[k]||0),0);$('chartEmpty').hidden=true;$('mInitial').textContent=fmt(result.initial);$('mFinal').textContent=fmt(result.final);$('mProfit').textContent=(result.profit>0?'+':'')+fmt(result.profit);$('mProfit').classList.toggle('loss',result.profit<0);$('mTrades').textContent=result.trades.length+'회';$('profitDetail').textContent=`변화율 ${result.return_pct>0?'+':''}${fmt(result.return_pct)}% · ${result.shares}주 아직 보유`;$('costTotal').textContent=`낸 비용 합계 ${fmt(sum('cost'))}원`;
+ $('warning').textContent=result.calculation_mode==='fixed_trades_repriced'?'기존 실제 AI 판단·매매 고정 / 공식 비용만 재계산 · 새 AI 판단 아님':'실제 Codex AI 판단 · 선택한 조건과 공식 비용 반영 · 실제 투자 성과 아님';
+ $('source').textContent=`${result.name||'삼성전자'} · ${result.actual_start} ~ ${result.actual_end} · 선 = 그날 마지막 가격 / 삼각형 = 다음 거래일 가상 매매 가격`;
  $('day').replaceChildren(...result.signals.map(s=>new Option(s.date+' · '+word[s.action],s.date)));$('day').disabled=false;
- $('trades').replaceChildren(...result.trades.map(t=>{const row=document.createElement('tr');for(const v of[t.date,word[t.side],fmt(t.price),fmt(t.quantity),fmt(t.cost),t.signal_date]){const td=document.createElement('td');td.textContent=v;row.append(td);}row.addEventListener('click',()=>selectDay(t.signal_date));return row;}));
- $('empty').textContent=result.trades.length?'':'이 기간에는 체결이 없습니다. 결과를 만들기 위해 판단을 임의 변경하지 않습니다.';
- list($('assumptions'),result.assumptions);chart();selectDay(result.trades[0]?.signal_date||result.signals[0].date);$('download').disabled=false;
-}
-function clearResult(){revision++;result=null;for(const id of['mInitial','mFinal','mProfit','mTrades','decision','aiReason','fill','audit'])$(id).textContent='—';$('chart').replaceChildren();$('trades').replaceChildren();$('day').replaceChildren();$('day').disabled=true;$('download').disabled=true;$('facts').replaceChildren();$('reason').textContent='실행 결과가 없습니다.';$('source').textContent='';$('empty').textContent='';}
-$('controls').addEventListener('submit',async e=>{
- e.preventDefault();clearResult();const submitted=revision;$('run').disabled=true;
- $('status').textContent='입력 검증 및 가상 매매 계산 중…';
- try{
-  const response=await fetch('/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({dataset:$('dataset').value,mode:$('mode').value,start:$('start').value,end:$('end').value,initial:$('initial').value,fee:String(Number($('fee').value)/100)})});
-  const data=await response.json();if(submitted!==revision)return;
-  if(!response.ok)throw Error(data.error);result=data;render();
-  $('status').textContent=`완료 · ${result.signals.length}일 판단 · 실제 주문 0건`;
- }catch(err){if(submitted===revision){$('status').textContent='실행 중단: '+err.message;$('warning').textContent='검증 실패 · 이전 결과를 표시하지 않습니다.';}}
- finally{$('run').disabled=false;}
-});
-$('day').addEventListener('change',()=>selectDay($('day').value));
-function changed(){clearResult();$('status').textContent='조건이 변경됐습니다. 다시 실행하세요.';$('warning').textContent='선택한 가격·판단 출처를 확인하고 실행하세요. 실제 투자 성과 아님';}
-$('controls').addEventListener('change',changed);
-$('controls').addEventListener('input',changed);
+ $('trades').replaceChildren(...result.trades.map(t=>{const row=document.createElement('tr'),first=document.createElement('td'),button=document.createElement('button');button.type='button';button.textContent=t.date+' · '+word[t.side];button.addEventListener('click',()=>{selectDay(t.signal_date);$('day').focus();});first.append(button);row.append(first);for(const v of[`${fmt(t.price)}원 × ${t.quantity}주`,fmt(t.gross)+'원',fmt(t.commission)+'원',fmt(t.transaction_tax)+'원',fmt(t.rural_tax)+'원',fmt(t.cash_after)+'원']){const td=document.createElement('td');td.textContent=v;row.append(td);}return row;}));
+ $('empty').textContent=result.trades.length?`수수료 ${fmt(sum('commission'))}원 + 거래세 ${fmt(sum('transaction_tax'))}원 + 농특세 ${fmt(sum('rural_tax'))}원. 아직 팔지 않은 ${result.shares}주의 매도 비용은 미차감입니다.`:'매매 0회입니다. AI가 기다렸거나 제한 규칙에 걸리면 거래하지 않는 것이 정상입니다.';
+ list($('assumptions'),result.assumptions);selectDay(result.signals[0].date);$('download').disabled=false;}
+function clearResult(){$('resultPanels').hidden=true;result=null;selected=null;comparisonResult=null;if($('resultContext'))$('resultContext').hidden=true;document.getElementById('positionRule')?.remove();document.getElementById('comparisonDay')?.remove();for(const id of ['profitDetail','costTotal','balance'])$(id).textContent='—';for(const id of ['mInitial','mFinal','mProfit','mTrades','aiReason','fill','audit'])$(id).textContent='—';for(const id of ['chart','equityChart','trades','day','checks','facts'])$(id).replaceChildren();for(const id of ['day','prevDay','nextDay','download'])$(id).disabled=true;$('chartEmpty').hidden=false;$('reason').textContent='결과가 없습니다.';$('decision').textContent='아직 결과가 없어요';$('source').textContent='';$('empty').textContent='';}
+$('day').addEventListener('change',()=>selectDay($('day').value));for(const [id,delta]of[['prevDay',-1],['nextDay',1]])$(id).addEventListener('click',()=>{if(!result)return;const i=result.signals.findIndex(s=>s.date===selected)+delta;if(result.signals[i])selectDay(result.signals[i].date);});
 $('download').addEventListener('click',()=>{if(!result)return;const url=URL.createObjectURL(new Blob([JSON.stringify(result,null,2)],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='backtest-'+result.run_hash.slice(0,12)+'.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
-fetch('/api/datasets').then(r=>r.json()).then(items=>{$('dataset').replaceChildren(...items.map(d=>new Option(d.name+(d.source==='synthetic'?' (샘플)':' (NH)'),d.id)));
- if(new URLSearchParams(location.search).get('preset')==='filming'){
-  const nh=items.find(d=>d.id==='nh-005930'&&d.source==='nh_period');
-  if(!nh)throw Error('촬영 데이터 없음');
-  $('dataset').value=nh.id;$('start').value='2026-09-14';$('end').value='2026-09-23';$('mode').value='replay';
-  $('warning').textContent='NH 과거 시세 · 실제 Codex 판단 기록 재생 · 실제 투자 성과 아님';
-  $('status').textContent='촬영 조건 준비 완료. 백테스트 실행을 누르세요.';
- }
-}).catch(()=>{$('status').textContent='데이터 목록 또는 촬영 데이터를 불러오지 못했습니다.';$('run').disabled=true;});
+if(new URLSearchParams(location.search).get('preset')==='filming')$('status').textContent='실제 NH·Codex 기록이 준비되면 위 버튼으로 공식 비용을 반영한 결과를 확인하세요.';

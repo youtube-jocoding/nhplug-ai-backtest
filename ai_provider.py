@@ -27,7 +27,7 @@ class CodexProvider:
         key = fingerprint(snap)
         file = self.cache / (key + '.json')
         if file.exists():
-            item = json.loads(file.read_text())
+            item = json.loads(file.read_text(encoding='utf-8'))
             if item['input'] != snap or item['input_hash'] != key or item['provider'] != 'codex-cli':
                 raise ValueError('캐시 입력·출처 불일치')
             return dict(item['output'], provider='codex-cli')
@@ -51,10 +51,12 @@ class CodexProvider:
                        '--json', '--output-schema', str(schema), '-o', str(out), '-']
             # Only login/runtime necessities; never pass NH credentials to the model process.
             env = {k: v for k, v in os.environ.items()
-                   if k in ('HOME', 'PATH', 'TMPDIR', 'LANG', 'USER', 'LOGNAME', 'CODEX_HOME')}
+                   if k in ('HOME', 'PATH', 'TMPDIR', 'LANG', 'USER', 'LOGNAME', 'CODEX_HOME',
+                            'USERPROFILE', 'SYSTEMROOT', 'SystemRoot', 'WINDIR',
+                            'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP', 'PATHEXT', 'COMSPEC')}
             print('Codex 판단 요청:', snap['date'], flush=True)
             p = subprocess.run(command, input=prompt, text=True, capture_output=True,
-                               timeout=180, env=env)
+                               timeout=180, env=env, encoding='utf-8')
             if p.returncode or not out.exists():
                 raise RuntimeError('Codex 호출 실패 (인증/실행 환경 확인). 응답을 가상 판단으로 대체하지 않습니다.')
             events = []
@@ -65,14 +67,14 @@ class CodexProvider:
                 item = event.get('item', {})
                 if item.get('type') in ('command_execution', 'mcp_tool_call', 'web_search', 'file_change'):
                     raise RuntimeError('외부 도구를 사용한 AI 응답은 검증 자료로 사용할 수 없습니다')
-            response = json.loads(out.read_text())
+            response = json.loads(out.read_text(encoding='utf-8'))
             if set(response) != {'decision', 'reason'} or response['decision'] not in ('buy', 'sell', 'hold') or not isinstance(response['reason'], str) or not response['reason'].strip():
                 raise ValueError('Codex JSON 검증 실패')
             envelope = dict(input=snap, input_hash=key, output=response, provider='codex-cli',
                             created_at=datetime.now(timezone.utc).isoformat(),
                             future_knowledge_excluded=False,
                             cli_version=subprocess.check_output([self.binary, '--version'], text=True).strip())
-            file.write_text(json.dumps(envelope, ensure_ascii=False, indent=2))
+            file.write_text(json.dumps(envelope, ensure_ascii=False, indent=2), encoding='utf-8')
             self.calls += 1
             return dict(response, provider='codex-cli')
 

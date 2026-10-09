@@ -1,4 +1,4 @@
-"""Zero third-party Python dependencies. Creates a private project venv."""
+"""Portable setup, including timezone data on Windows. Creates a private project venv."""
 import json
 import os
 from pathlib import Path
@@ -16,20 +16,29 @@ def main():
     env = ROOT / '.venv'
     binary = env / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
     if not binary.exists():
-        venv.EnvBuilder(with_pip=False).create(env)
-    subprocess.run([str(binary), '-m', 'unittest', 'discover', '-v'], cwd=ROOT, check=True)
+        venv.EnvBuilder(with_pip=True).create(env)
+    zone = subprocess.run([str(binary), '-c', "from zoneinfo import ZoneInfo; ZoneInfo('Asia/Seoul')"], capture_output=True)
+    if zone.returncode:
+        subprocess.run([str(binary), '-m', 'ensurepip', '--upgrade'], check=True)
+        subprocess.run([str(binary), '-m', 'pip', 'install', 'tzdata'], check=True)
+    subprocess.run([str(binary), '-X', 'utf8', '-m', 'unittest', 'discover', '-v'], cwd=ROOT, check=True)
     from ai_provider import CodexProvider
     provider = CodexProvider(ROOT / 'cache', True)
     working = False
     if provider.binary:
         try:
-            working = subprocess.run([provider.binary, '--version'], capture_output=True, timeout=10).returncode == 0
+            version = subprocess.run([provider.binary, '--version'], capture_output=True, timeout=10)
+            help_result = subprocess.run([provider.binary, 'exec', '--help'], capture_output=True, timeout=10, text=True, encoding='utf-8')
+            login = subprocess.run([provider.binary, 'login', 'status'], capture_output=True, timeout=10)
+            working = version.returncode == login.returncode == help_result.returncode == 0 and all(flag in help_result.stdout for flag in ('--ignore-user-config', '--output-schema', '--ephemeral', '--sandbox'))
         except (OSError, subprocess.TimeoutExpired):
             pass
     print(json.dumps(dict(python=str(binary), codex_available=working,
                           curl_available=bool(shutil.which('curl')),
                           next='Run the venv Python with setup.py --open. User enters keys only in browser.'), ensure_ascii=False))
 
+    if not working or not shutil.which('curl'):
+        raise SystemExit('Codex CLI 로그인·필수 기능 또는 curl 확인이 필요합니다. Codex가 설치와 로그인을 도와야 합니다.')
 
 if __name__ == '__main__':
     main()

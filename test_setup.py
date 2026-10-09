@@ -28,9 +28,11 @@ class SetupTests(unittest.TestCase):
             p.stop()
         self.tmp.cleanup()
 
-    def request(self, path, body=None, origin=True, host=None):
+    def request(self, path, body=None, origin=True, host=None, csrf=None):
         c = http.client.HTTPConnection('127.0.0.1', self.server.server_port)
         headers = {'Cookie': self.cookie}
+        if csrf is not None:
+            headers['X-Backtest-CSRF'] = csrf
         if origin:
             headers['Origin'] = f'http://127.0.0.1:{self.server.server_port}'
         if host:
@@ -49,6 +51,47 @@ class SetupTests(unittest.TestCase):
     def test_unauthenticated_read_and_write_blocked(self):
         self.assertEqual(self.request('/api/status')[0], 401)
         self.assertEqual(self.request('/api/keys', {})[0], 403)
+
+    def test_ai_scenario_requires_same_origin_token_and_explicit_consent(self):
+        options = json.loads(self.request('/api/scenario-options')[2])
+        token = options['csrf']
+        body = dict(config=options['defaults'], consent=False)
+        self.assertEqual(self.request('/api/scenario-ai', body)[0], 403)
+        self.assertEqual(self.request('/api/scenario-ai', body, origin=False, csrf=token)[0], 403)
+        self.assertEqual(self.request('/api/scenario-ai', body, csrf=token)[0], 400)
+        self.assertFalse(self.server.state.busy)
+
+    def test_results_open_without_cookie_but_mutations_stay_protected(self):
+        self.assertEqual(self.request('/')[0], 303)
+        for path in ('/app.js', '/style.css'):
+            self.assertEqual(self.request(path)[0], 200)
+        with patch('costs.reprice_saved', return_value={'test_result': True}), \
+                patch('server.Path.read_text', return_value='{"source":"nh_period"}'):
+            status, _, body = self.request('/api/official-result')
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body), {'test_result': True})
+        self.assertEqual(self.request('/api/start', {'consent': True})[0], 403)
+        self.assertEqual(self.request('/api/keys', {})[0], 403)
+        self.assertEqual(self.request('/', host='attacker.test')[0], 403)
+
+    def test_normal_setup_url_works_without_manual_authentication(self):
+        status, headers, body = self.request('/setup')
+        self.assertEqual(status, 200)
+        self.assertIn('앱키', body)
+        self.cookie = headers['Set-Cookie'].split(';')[0]
+        self.assertEqual(self.request('/api/status')[0], 200)
+        self.assertEqual(self.request('/setup', host='attacker.test')[0], 403)
+
+    def test_prepare_prices_does_not_call_ai_or_publish_performance(self):
+        from run import synthetic
+        data = synthetic()
+        state = setup.State()
+        with patch.object(setup.nh_client, 'fetch', return_value={}), patch.object(setup, 'normalize', return_value=data), patch.object(setup, 'CodexProvider') as ai:
+            state.job()
+            ai.assert_not_called()
+        self.assertEqual(state.stage, 'done')
+        self.assertTrue((self.root / 'datasets/nh-005930.json').exists())
+        self.assertFalse((self.root / 'runs').exists())
 
     def test_bootstrap_token_one_use(self):
         token = self.server.state.token

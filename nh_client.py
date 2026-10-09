@@ -17,13 +17,13 @@ QUOTE = '/krstock/quote/v1/period'
 def credentials():
     key_file = ROOT / 'private/keys.json'
     if key_file.exists() and not os.environ.get('NH_ENV_FILE'):
-        values = json.loads(key_file.read_text())
+        values = json.loads(key_file.read_text(encoding='utf-8'))
         if not all(isinstance(values.get(k), str) and values[k] for k in ('NH_KEY', 'NH_SECRET')):
             raise ValueError('로컬 키 설정을 다시 확인하세요')
         return {k: values[k] for k in ('NH_KEY', 'NH_SECRET')}
     values = {}
     env_file = Path(os.environ.get('NH_ENV_FILE', ROOT / '.env'))
-    for line in env_file.read_text().splitlines():
+    for line in env_file.read_text(encoding='utf-8').splitlines():
         key, sep, value = line.strip().removeprefix('export ').partition('=')
         if sep and key.strip() in ('NH_KEY', 'NH_SECRET'):
             value = value.strip()
@@ -62,7 +62,7 @@ def request(url, body, headers):
                                 input='\n'.join(config), capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError('NH TLS/통신 오류 (자격증명 보호를 위해 원문 생략)')
-        lines = header_path.read_text().splitlines()
+        lines = header_path.read_text(encoding='utf-8').splitlines()
         status = int(next(s for s in reversed(lines) if s.startswith('HTTP/')).split()[1])
         response_headers = dict((k.lower(), v.strip()) for line in lines
                                 for k, sep, v in [line.partition(':')] if sep)
@@ -78,7 +78,7 @@ def token():
     keys = credentials()
     key_hash = hashlib.sha256((keys['NH_KEY'] + '\0' + keys['NH_SECRET']).encode()).hexdigest()
     if CACHE.exists():
-        cached = json.loads(CACHE.read_text())
+        cached = json.loads(CACHE.read_text(encoding='utf-8'))
         if cached.get('key_hash') == key_hash and cached.get('expires_at', 0) > time.time() + 120:
             return cached['access_token']
     query = urlencode(dict(appkey=keys['NH_KEY'], appsecretkey=keys['NH_SECRET'],
@@ -90,7 +90,7 @@ def token():
     CACHE.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(CACHE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.chmod(CACHE, 0o600)
-    with os.fdopen(fd, 'w') as f:
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
         json.dump(dict(access_token=raw['access_token'],
                        key_hash=key_hash,
                        expires_at=time.time() + int(raw.get('expires_in', 86400))), f)

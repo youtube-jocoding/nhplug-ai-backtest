@@ -60,10 +60,18 @@ def snapshot(data, index, cash, qty, avg):
                 limitation='현재 AI의 과거 재분석. 미래 지식 유입을 배제할 수 없음. 공시·뉴스는 입력하지 않음.')
 
 
-def run(data, start, end, initial, fee, provider):
+def run(data, start, end, initial, fee, provider, *, official_costs=False, strategy_config=None):
     validate_dataset(data)
     date.fromisoformat(start); date.fromisoformat(end)
     initial, fee = D(initial), D(fee)
+    if strategy_config is not None:
+        from scenarios import parse, instructions, checks, measurements, decide
+        strategy_config = parse(strategy_config)
+    buy_budget = strategy_config['buy_amount'] if strategy_config else strategy.BUY_AMOUNT
+    if official_costs:
+        from costs import validate_scope, charges, PROFILE
+        validate_scope(data['symbol'], start, end)
+        fee = D(PROFILE['commission_rate'])
     if not initial.is_finite() or initial <= 0 or not fee.is_finite() or not 0 <= fee < 1:
         raise ValueError('초기 금액 또는 비용률 오류')
     indices = [i for i, b in enumerate(data['bars']) if start <= b['date'] <= end]
@@ -80,31 +88,46 @@ def run(data, start, end, initial, fee, provider):
         price = D(b['open'])
         if pending and pending['action'] == 'BUY' and qty == 0:
             amount = min(int((cash / (price * (1 + fee))).to_integral_value(rounding=ROUND_FLOOR)),
-                         int(D(strategy.BUY_AMOUNT) // price))
+                         int(D(buy_budget) // price))
             if amount > 0:
                 cost = amount * price * fee
+                breakdown = charges(amount * price, 'BUY') if official_costs else {'commission': cost, 'transaction_tax': D(0), 'rural_tax': D(0), 'cost': cost}
+                cost = breakdown['cost']
                 cash -= amount * price + cost
                 qty, avg = amount, price
                 trades.append(dict(date=b['date'], side='BUY', price=float(price), quantity=qty,
                                    cost=float(cost), signal_date=pending['date'], reason=pending['reason'],
-                                   input_hash=pending['input_hash']))
+                                   input_hash=pending['input_hash'], gross=float(amount * price), cash_after=float(cash),
+                                   **{k: float(v) for k, v in breakdown.items() if k != 'cost'}))
         elif pending and pending['action'] == 'SELL' and qty:
             cost = qty * price * fee
+            breakdown = charges(qty * price, 'SELL') if official_costs else {'commission': cost, 'transaction_tax': D(0), 'rural_tax': D(0), 'cost': cost}
+            cost = breakdown['cost']
             cash += qty * price - cost
             trades.append(dict(date=b['date'], side='SELL', price=float(price), quantity=qty,
                                cost=float(cost), signal_date=pending['date'], reason=pending['reason'],
-                               input_hash=pending['input_hash']))
+                               input_hash=pending['input_hash'], gross=float(qty * price), cash_after=float(cash),
+                               **{k: float(v) for k, v in breakdown.items() if k != 'cost'}))
             qty, avg = 0, D(0)
         if cash < 0 or qty < 0:
             raise AssertionError('현금/수량 음수')
         value = cash + qty * D(b['close'])
         equity.append(dict(date=b['date'], value=float(value), cash=float(cash), shares=qty))
         snap = snapshot(data, index, cash, qty, avg)
+        if strategy_config is not None:
+            snap['strategy_config'] = strategy_config
+            snap['instructions'] = instructions(strategy_config)
+            snap['condition_checks'] = checks(snap['market'], strategy_config)
+            snap['measurements'] = measurements(snap['market'], strategy_config)
+            if strategy_config['use_ma'] and snap['measurements']['long'] is None:
+                raise ValueError('선택한 평균 기간을 계산할 과거 가격이 부족합니다.')
+            snap['indicators'] = [r['detail'] + (' (사용)' if r['enabled'] else ' (사용 안 함)') for r in snap['condition_checks']]
         # Failure is fatal: never silently substitute fake AI or fill missing evidence.
         ai = provider(snap)
         if ai.get('decision') not in ('buy', 'sell', 'hold') or not isinstance(ai.get('reason'), str) or not ai['reason'].strip():
             raise ValueError('AI 판단 형식 오류 또는 판단 누락')
-        action, reason = strategy.decide(dict(snap['market'], ai=ai))
+        action, reason = (decide(snap['market'], ai, strategy_config) if strategy_config is not None
+                          else strategy.decide(dict(snap['market'], ai=ai)))
         # Clarify the original position rule without changing its decision.
         if action == 'hold' and qty > 0 and ai['decision'] == 'buy':
             reason = '이미 보유 중이어서 원본 전략에 따라 추가 매수하지 않고 보유합니다. AI 원문 판단은 아래에 별도 표시합니다.'
@@ -123,12 +146,24 @@ def run(data, start, end, initial, fee, provider):
                   bars=[data['bars'][i] for i in indices], source=data['source'],
                   symbol=data['symbol'], name=data.get('name'), retrieved_at=data['retrieved_at'],
                   requested_start=start, requested_end=end, actual_start=equity[0]['date'],
-                  actual_end=equity[-1]['date'], cost_rate_per_side=float(fee), buy_amount=strategy.BUY_AMOUNT,
+                  actual_end=equity[-1]['date'], cost_rate_per_side=float(fee), buy_amount=buy_budget,
                   strategy_commit=COMMIT, dataset_hash=fingerprint(data),
                   assumptions=['하루 한 번 종가 판단 → 다음 거래일 시가 가상 체결',
                                '1종목 · 정수 수량 · 매수 예산 30만 원 · 비용은 별도 가정',
                                '마지막 날 미청산 보유분은 종가 평가 · 마지막 판단 미체결',
                                '배당·세금 별도 계산·슬리피지·시장충격·체결 불가 상황 미반영',
                                '현재 AI 재분석에는 미래 지식 유입 가능 · 실제 투자 성과 아님'])
+    if official_costs:
+        result['cost_profile'] = PROFILE
+        result['calculation_mode'] = 'fresh_ai'
+        result['assumptions'][1] = '삼성전자 1종목 · 정수 수량 · 매수 예산 30만 원 · 매수·매도 수수료 각각 0.01%'
+        result['assumptions'][3] = '매도 거래세 0.05% + 농특세 0.15% 반영 · 배당·개인별 과세·슬리피지·시장충격·체결 불가 미반영'
+        result['assumptions'].append(PROFILE['rounding'])
+    if strategy_config is not None:
+        result['strategy_config'] = strategy_config
+        result['ai_mode'] = 'codex-cli' if all(s['provider'] == 'codex-cli' for s in signals) else 'test-provider'
+        result['calculation_mode'] = 'configured_ai'
+        result['assumptions'][1] = f'삼성전자 1종목 · 정수 수량 · 매수 예산 {buy_budget:,}원 · 수수료와 매도 세금 별도'
+        result['assumptions'][4] = '선택한 설정·프롬프트와 그날의 가상 잔고로 AI가 판단합니다. 현재 AI가 이후 정보를 알고 있을 가능성은 배제할 수 없습니다.'
     result['run_hash'] = fingerprint(result)
     return result

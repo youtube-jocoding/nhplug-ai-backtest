@@ -14,7 +14,7 @@ HERE = Path(__file__).parent
 def datasets():
     items = {'sample': synthetic()}
     for f in (HERE / 'datasets').glob('*.json'):
-        item = json.loads(f.read_text())
+        item = json.loads(f.read_text(encoding='utf-8'))
         validate_dataset(item)
         items[f.stem] = item
     return items
@@ -39,14 +39,32 @@ class Handler(BaseHTTPRequestHandler):
         if not self.valid_host():
             return self.reply(403, {'error': '로컬 호스트만 허용'})
         path = urlsplit(self.path).path
+        if path == '/api/experiments':
+            try:
+                files = sorted((HERE / 'runs/experiments').glob('*.json'), key=lambda f: f.stat().st_mtime, reverse=True)[:20]
+                records = [json.loads(f.read_text(encoding='utf-8')) for f in files]
+                if any(r.get('ai_mode') != 'codex-cli' or r.get('source') != 'nh_period' for r in records):
+                    raise ValueError('실험 기록의 출처가 올바르지 않습니다.')
+                return self.reply(200, records)
+            except (OSError, ValueError):
+                return self.reply(400, {'error': 'AI 실험 기록을 읽지 못했습니다. 샘플로 대체하지 않습니다.'})
+        if path == '/api/official-result':
+            from costs import reprice_saved
+            try:
+                saved = json.loads((HERE / 'runs/nh-codex.json').read_text(encoding='utf-8'))
+                if saved.get('cost_profile', {}).get('id') == 'nh-plug-kospi-2026':
+                    return self.reply(200, saved)
+                return self.reply(200, reprice_saved(saved))
+            except (OSError, ValueError, KeyError) as e:
+                return self.reply(400, {'error': '공식 비용으로 계산할 실제 AI 기록이 없습니다. 설정 화면에서 먼저 실행하세요.'})
         if path == '/api/datasets':
             return self.reply(200, [{'id': k, 'name': v.get('name', k), 'source': v['source'],
                                      'first': v['bars'][0]['date'], 'last': v['bars'][-1]['date']}
                                     for k, v in datasets().items()])
-        paths = {'/': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css'}
+        paths = {'/': 'index.html', '/app.js': 'app.js', '/scenario.js': 'scenario.js', '/style.css': 'style.css'}
         if path not in paths:
             return self.reply(404, {'error': '없는 경로'})
-        kind = {'/': 'text/html', '/app.js': 'text/javascript', '/style.css': 'text/css'}[path]
+        kind = {'/': 'text/html', '/app.js': 'text/javascript', '/scenario.js': 'text/javascript', '/style.css': 'text/css'}[path]
         return self.reply(200, (HERE / 'web' / paths[path]).read_bytes(), kind)
 
     def do_POST(self):
